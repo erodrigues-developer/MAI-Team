@@ -1,0 +1,142 @@
+name: Architect Bootstrap
+
+on:
+  issues:
+    types: [labeled, opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: architect-bootstrap-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  start-interview:
+    if: >
+      github.event_name == 'issues' &&
+      github.event.label.name == 'architect:bootstrap' &&
+      github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post bootstrap interview template
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = [
+              "Architect bootstrap iniciado.",
+              "",
+              "Responda neste issue com um comentário iniciando com `/architect-bootstrap` e preenchendo o template abaixo:",
+              "",
+              "```md",
+              "/architect-bootstrap",
+              "system_type: ",
+              "language_framework: ",
+              "primary_data_store: ",
+              "architecture_style: ",
+              "testing_strategy: ",
+              "dependency_policy: ",
+              "security_posture: ",
+              "expected_scale: ",
+              "deployment_target: ",
+              "observability_expectations: ",
+              "target_users: ",
+              "core_problem_and_value: ",
+              "```",
+              "",
+              "Depois da sua resposta, o workflow vai gerar:",
+              "- `.ai/context/project-brief.md`",
+              "- `.ai/context/architecture.md`",
+              "- `.ai/context/stack.md`",
+              "- `.ai/context/coding-style.md`",
+              "- `.ai/context/security.md`",
+              "",
+              "E em seguida disparar `Bootstrap Labels`."
+            ].join("\\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });
+
+  process-answers:
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.issue.state == 'open' &&
+      github.event.issue.pull_request == null &&
+      contains(github.event.comment.body, '/architect-bootstrap') &&
+      contains(join(github.event.issue.labels.*.name, ','), 'architect:bootstrap')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate context files from architect answers
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are the Architect Agent running bootstrap for this repository.
+
+            Read and follow:
+            - .ai/agents/architect.md
+            - .ai/bootstrap/architecture-interview.md
+            - .ai/context/project-brief.md (template)
+            - .ai/context/architecture.md (template)
+            - .ai/context/stack.md (template)
+            - .ai/context/coding-style.md (template)
+            - .ai/context/security.md (template)
+
+            Source of truth for interview answers is the issue comment body below:
+            ---
+            ${{ github.event.comment.body }}
+            ---
+
+            Tasks:
+            1. Parse the answers from the comment.
+            2. Generate/update ONLY:
+               - .ai/context/project-brief.md
+               - .ai/context/architecture.md
+               - .ai/context/stack.md
+               - .ai/context/coding-style.md
+               - .ai/context/security.md
+            3. Keep content concise, specific, and internally consistent.
+            4. If critical answers are missing, use `TBD` with recommended defaults.
+            5. Do not modify unrelated files.
+            6. Save changes with commit message:
+               chore(bootstrap): generate context from architect interview
+            7. If direct push to default branch is blocked, create a bootstrap branch and open a PR.
+
+      - name: Trigger labels bootstrap workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ref = context.payload.repository.default_branch || "main";
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "bootstrap-labels.yml",
+              ref
+            });
+
+      - name: Comment bootstrap completion
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                "Bootstrap arquitetural processado.",
+                "",
+                "Arquivos de contexto atualizados em `.ai/context/*`.",
+                "Workflow `Bootstrap Labels` disparado para sincronizar labels."
+              ].join("\\n")
+            });
