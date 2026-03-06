@@ -1,0 +1,109 @@
+name: Bootstrap Labels
+
+on:
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  create-labels:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install bootstrap dependencies
+        run: pip install pyyaml
+
+      - name: Create labels from bootstrap config
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import yaml
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          token = os.environ["GITHUB_TOKEN"]
+          owner, repo_name = repo.split("/", 1)
+
+          with open(".ai/bootstrap/bootstrap-config.yml", "r", encoding="utf-8") as f:
+              cfg = yaml.safe_load(f) or {}
+          create_default_labels = cfg.get("project", {}).get("create_default_labels", True)
+
+          if not create_default_labels:
+              print("Label bootstrap disabled by .ai/bootstrap/bootstrap-config.yml")
+              raise SystemExit(0)
+
+          with open(".ai/bootstrap/labels.yml", "r", encoding="utf-8") as f:
+              labels_cfg = yaml.safe_load(f) or {}
+          labels = labels_cfg.get("labels", [])
+
+          if not labels:
+              print("No labels found in .ai/bootstrap/labels.yml")
+              raise SystemExit(0)
+
+          api_base = f"https://api.github.com/repos/{owner}/{repo_name}"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "mai-bootstrap-labels",
+          }
+
+          def request(method, url, payload=None):
+              data = None
+              if payload is not None:
+                  data = json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(url, data=data, headers=headers, method=method)
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      return resp.status, resp.read().decode("utf-8")
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode("utf-8") if e.fp else ""
+                  return e.code, body
+
+          for label in labels:
+              name = label["name"]
+              payload = {
+                  "new_name": name,
+                  "color": label["color"],
+                  "description": label.get("description", ""),
+              }
+
+              label_url = f"{api_base}/labels/{urllib.parse.quote(name, safe='')}"
+              status, _ = request("GET", label_url)
+
+              if status == 404:
+                  create_payload = {
+                      "name": name,
+                      "color": label["color"],
+                      "description": label.get("description", ""),
+                  }
+                  create_status, create_body = request("POST", f"{api_base}/labels", create_payload)
+                  if create_status in (200, 201):
+                      print(f"Created label: {name}")
+                  else:
+                      raise RuntimeError(f"Failed to create label {name}: {create_status} {create_body}")
+              elif status == 200:
+                  patch_status, patch_body = request("PATCH", label_url, payload)
+                  if patch_status == 200:
+                      print(f"Updated label: {name}")
+                  else:
+                      raise RuntimeError(f"Failed to update label {name}: {patch_status} {patch_body}")
+              else:
+                  raise RuntimeError(f"Failed to query label {name}: HTTP {status}")
+          PY

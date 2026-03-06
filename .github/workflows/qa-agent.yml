@@ -1,0 +1,58 @@
+name: QA Agent
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: qa-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  qa-check:
+    name: qa-check
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect Node project
+        id: detect_node
+        shell: bash
+        run: |
+          if [ -f package.json ]; then
+            echo "is_node=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_node=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.detect_node.outputs.is_node == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.detect_node.outputs.is_node == 'true'
+        run: npm ci
+
+      - name: Run lint
+        if: steps.detect_node.outputs.is_node == 'true'
+        run: npm run lint --if-present
+
+      - name: Run unit tests
+        if: steps.detect_node.outputs.is_node == 'true'
+        run: npm test -- --runInBand
+
+      - name: No stack detected yet
+        if: steps.detect_node.outputs.is_node != 'true'
+        run: |
+          echo "No supported stack detected yet."
+          echo "This job is passing temporarily because the project bootstrap is still in progress."

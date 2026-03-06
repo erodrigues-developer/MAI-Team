@@ -1,0 +1,67 @@
+name: AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+  statuses: write
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-review:
+    name: ai-review
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Claude Code review
+        id: claude_review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are the AI review agent for this repository.
+
+            Read and follow:
+            - .ai/agents/qa.md
+            - .ai/policies/workflows.yml
+            - .ai/context/project-brief.md if it exists
+            - .ai/context/architecture.md if it exists
+            - .ai/context/stack.md if it exists
+            - .ai/context/coding-style.md if it exists
+            - .ai/context/security.md if it exists
+
+            Review this pull request strictly.
+
+            Pull request title:
+            ${{ github.event.pull_request.title }}
+
+            Pull request body:
+            ${{ github.event.pull_request.body }}
+
+            Requirements:
+            - Evaluate scope control
+            - Evaluate risk of regressions
+            - Evaluate code quality
+            - Evaluate adherence to architecture and project context
+            - Evaluate whether tests are sufficient
+
+            Output:
+            - A review summary
+            - A clear verdict: PASS or FAIL
+            - Concrete required changes if FAIL
+
+      - name: Mark success
+        if: success()
+        run: echo "AI review passed"

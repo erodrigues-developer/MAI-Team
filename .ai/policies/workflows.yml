@@ -1,0 +1,43 @@
+version: 1
+
+states:
+  manual:
+    - backlog
+    - ready
+    - dev:in_progress
+    - requirements:approved
+    - ui:approved
+  automatic:
+    - pr:opened
+    - pr:ai_reviewed
+    - testing
+    - ready_for_publish
+
+transitions:
+  - from: dev:in_progress
+    to: pr:opened
+    trigger: github.issue.labeled
+    actor: ai
+
+  - from: pr:opened
+    to: pr:ai_reviewed
+    trigger: github.pull_request.opened
+    actor: ai
+
+  - from: pr:ai_reviewed
+    to: testing
+    trigger: github.pull_request.merged
+    actor: ai
+
+  - from: testing
+    to: ready_for_publish
+    trigger: github.checks.qa_passed
+    actor: ai
+
+rules:
+  branch_naming: "feature/{jira_key}-{slug}"
+  pr_base_branch: "main"
+  required_human_approvals: 1
+  required_ai_checks:
+    - ai-review
+    - qa-check

@@ -1,0 +1,127 @@
+name: AI Dev Agent
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: ai-dev-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  validate-issue:
+    if: github.event.label.name == 'dev:in_progress' && github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    outputs:
+      jira_key: ${{ steps.extract.outputs.jira_key }}
+      can_proceed: ${{ steps.validate.outputs.can_proceed }}
+
+    steps:
+      - name: Extract Jira key from title
+        id: extract
+        shell: bash
+        run: |
+          TITLE="${{ github.event.issue.title }}"
+          JIRA_KEY=$(echo "$TITLE" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -n 1 || true)
+          echo "jira_key=$JIRA_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Validate minimum issue context
+        id: validate
+        shell: bash
+        run: |
+          BODY=$(cat <<'EOF'
+          ${{ github.event.issue.body }}
+          EOF
+          )
+
+          CAN_PROCEED=true
+
+          if [ -z "${{ steps.extract.outputs.jira_key }}" ]; then
+            echo "Missing Jira key in issue title."
+            CAN_PROCEED=false
+          fi
+
+          if [ -z "$BODY" ]; then
+            echo "Issue body is empty."
+            CAN_PROCEED=false
+          fi
+
+          echo "can_proceed=$CAN_PROCEED" >> "$GITHUB_OUTPUT"
+
+      - name: Comment when blocked
+        if: steps.validate.outputs.can_proceed != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                "AI Dev Agent bloqueado.",
+                "",
+                "Motivos possíveis:",
+                "- título sem chave Jira (ex.: MAI-123 - Add AI review workflow)",
+                "- corpo da issue vazio"
+              ].join("\n")
+            })
+
+  run-dev-agent:
+    needs: validate-issue
+    if: needs.validate-issue.outputs.can_proceed == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Claude Code as Dev Agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are the DEV agent for this repository.
+
+            Read and follow:
+            - .ai/agents/dev.md
+            - .ai/policies/workflows.yml
+            - .ai/context/project-brief.md if it exists
+            - .ai/context/architecture.md if it exists
+            - .ai/context/stack.md if it exists
+            - .ai/context/coding-style.md if it exists
+            - .ai/context/security.md if it exists
+            - docs/requirements/**
+            - docs/architecture/**
+            - docs/adr/**
+
+            Current GitHub issue:
+            - Number: ${{ github.event.issue.number }}
+            - Title: ${{ github.event.issue.title }}
+            - Body:
+            ${{ github.event.issue.body }}
+
+            Requirements:
+            1. Implement the minimum valid solution for this story.
+            2. Create or update tests when appropriate.
+            3. Use branch name:
+               feature/${{ needs.validate-issue.outputs.jira_key }}-issue-${{ github.event.issue.number }}
+            4. Open a pull request against 'main'.
+            5. Include the Jira key in the PR title.
+            6. Keep scope minimal and avoid unrelated changes.
+
+      - name: Comment on issue
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: "AI Dev Agent executado. Confira a branch e o PR gerados."
+            })
