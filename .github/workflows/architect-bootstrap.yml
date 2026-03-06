@@ -88,6 +88,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: true
+          claude_args: |
+            --max-turns 20
+            --allowedTools Edit,Read,Write,Bash
           prompt: |
             You are the Architect Agent running bootstrap for this repository.
 
@@ -118,6 +122,7 @@ jobs:
             5. Do not modify unrelated files.
             6. Do not run git commands and do not try to create commits or PRs.
                The workflow will handle PR creation automatically.
+            7. Prefer file editing tools over shell commands when updating context files.
 
       - name: Debug context files after generation
         shell: bash
