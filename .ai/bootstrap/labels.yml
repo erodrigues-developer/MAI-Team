@@ -30,3 +30,11 @@ labels:
   - name: "ready_for_publish"
     color: "22c55e"
     description: "Ready for release or publication"
+
+  - name: "bootstrap"
+    color: "a855f7"
+    description: "Project initialization and setup work"
+
+  - name: "architect:bootstrap"
+    color: "8b5cf6"
+    description: "Run the initial architecture interview"
