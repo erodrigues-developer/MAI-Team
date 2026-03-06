@@ -120,6 +120,44 @@ jobs:
                chore(bootstrap): generate context from architect interview
             7. If direct push to default branch is blocked, create a bootstrap branch and open a PR.
 
+      - name: Detect context changes
+        id: detect_changes
+        shell: bash
+        run: |
+          CHANGED_COUNT=$(git status --porcelain -- \
+            .ai/context/project-brief.md \
+            .ai/context/architecture.md \
+            .ai/context/stack.md \
+            .ai/context/coding-style.md \
+            .ai/context/security.md | wc -l | tr -d ' ')
+
+          if [ "$CHANGED_COUNT" -gt 0 ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create bootstrap context PR
+        id: create_pr
+        if: steps.detect_changes.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(bootstrap): generate context from architect interview"
+          title: "chore(bootstrap): generate context from architect interview"
+          body: |
+            Automated architect bootstrap context generation.
+
+            Source issue: #${{ github.event.issue.number }}
+          branch: "chore/bootstrap-context-issue-${{ github.event.issue.number }}"
+          base: ${{ github.event.repository.default_branch }}
+          add-paths: |
+            .ai/context/project-brief.md
+            .ai/context/architecture.md
+            .ai/context/stack.md
+            .ai/context/coding-style.md
+            .ai/context/security.md
+
       - name: Trigger labels bootstrap workflow
         uses: actions/github-script@v7
         with:
@@ -134,8 +172,19 @@ jobs:
 
       - name: Comment bootstrap completion
         uses: actions/github-script@v7
+        env:
+          HAS_CHANGES: ${{ steps.detect_changes.outputs.has_changes }}
+          PR_URL: ${{ steps.create_pr.outputs.pull-request-url }}
         with:
           script: |
+            const hasChanges = process.env.HAS_CHANGES === "true";
+            const prUrl = process.env.PR_URL;
+            const contextMsg = hasChanges
+              ? (prUrl
+                  ? `Arquivos de contexto gerados. PR criado: ${prUrl}`
+                  : "Arquivos de contexto gerados e commitados.")
+              : "Nenhuma alteração de contexto foi detectada (sem diff nos arquivos em `.ai/context/*`).";
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -143,7 +192,7 @@ jobs:
               body: [
                 "Bootstrap arquitetural processado.",
                 "",
-                "Arquivos de contexto atualizados em `.ai/context/*`.",
+                contextMsg,
                 "Workflow `Bootstrap Labels` disparado para sincronizar labels."
               ].join("\\n")
             });
