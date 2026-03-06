@@ -11,10 +11,6 @@ permissions:
   issues: write
   actions: write
 
-concurrency:
-  group: architect-bootstrap-${{ github.event.issue.number }}
-  cancel-in-progress: false
-
 jobs:
   start-interview:
     if: >
@@ -72,6 +68,9 @@ jobs:
       github.event.issue.pull_request == null &&
       contains(github.event.comment.body, '/architect-bootstrap') &&
       contains(join(github.event.issue.labels.*.name, ','), 'architect:bootstrap')
+    concurrency:
+      group: architect-bootstrap-process-${{ github.event.issue.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
