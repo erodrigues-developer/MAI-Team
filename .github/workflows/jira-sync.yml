@@ -1,75 +1,75 @@
-name: Jira Sync
+# name: Jira Sync
 
-on:
-  pull_request:
-    types: [opened, reopened, synchronize, closed]
+# on:
+#   pull_request:
+#     types: [opened, reopened, synchronize, closed]
 
-permissions:
-  contents: read
-  pull-requests: read
+# permissions:
+#   contents: read
+#   pull-requests: read
 
-concurrency:
-  group: jira-sync-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+# concurrency:
+#   group: jira-sync-${{ github.event.pull_request.number }}
+#   cancel-in-progress: true
 
-jobs:
-  extract-jira-key:
-    runs-on: ubuntu-latest
-    outputs:
-      jira_key: ${{ steps.extract.outputs.jira_key }}
-    steps:
-      - name: Extract Jira key from PR title or branch
-        id: extract
-        shell: bash
-        run: |
-          TEXT="${{ github.event.pull_request.title }} ${{ github.event.pull_request.head.ref }}"
-          JIRA_KEY=$(echo "$TEXT" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -n 1 || true)
-          echo "jira_key=$JIRA_KEY" >> "$GITHUB_OUTPUT"
+# jobs:
+#   extract-jira-key:
+#     runs-on: ubuntu-latest
+#     outputs:
+#       jira_key: ${{ steps.extract.outputs.jira_key }}
+#     steps:
+#       - name: Extract Jira key from PR title or branch
+#         id: extract
+#         shell: bash
+#         run: |
+#           TEXT="${{ github.event.pull_request.title }} ${{ github.event.pull_request.head.ref }}"
+#           JIRA_KEY=$(echo "$TEXT" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -n 1 || true)
+#           echo "jira_key=$JIRA_KEY" >> "$GITHUB_OUTPUT"
 
-  move-to-review:
-    needs: extract-jira-key
-    if: >
-      (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'synchronize')
-      && needs.extract-jira-key.outputs.jira_key != ''
-      && github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+#   move-to-review:
+#     needs: extract-jira-key
+#     if: >
+#       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'synchronize')
+#       && needs.extract-jira-key.outputs.jira_key != ''
+#       && github.event.pull_request.draft == false
+#     runs-on: ubuntu-latest
 
-    steps:
-      - name: Move Jira issue to In Review
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_TRANSITION_ID_IN_REVIEW: ${{ secrets.JIRA_TRANSITION_ID_IN_REVIEW }}
-          JIRA_KEY: ${{ needs.extract-jira-key.outputs.jira_key }}
-        run: |
-          curl --fail --silent --show-error \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -X POST \
-            "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_KEY/transitions" \
-            -d "{\"transition\":{\"id\":\"$JIRA_TRANSITION_ID_IN_REVIEW\"}}"
+#     steps:
+#       - name: Move Jira issue to In Review
+#         env:
+#           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+#           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+#           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+#           JIRA_TRANSITION_ID_IN_REVIEW: ${{ secrets.JIRA_TRANSITION_ID_IN_REVIEW }}
+#           JIRA_KEY: ${{ needs.extract-jira-key.outputs.jira_key }}
+#         run: |
+#           curl --fail --silent --show-error \
+#             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+#             -H "Content-Type: application/json" \
+#             -X POST \
+#             "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_KEY/transitions" \
+#             -d "{\"transition\":{\"id\":\"$JIRA_TRANSITION_ID_IN_REVIEW\"}}"
 
-  move-to-testing:
-    needs: extract-jira-key
-    if: >
-      github.event.action == 'closed'
-      && github.event.pull_request.merged == true
-      && needs.extract-jira-key.outputs.jira_key != ''
-    runs-on: ubuntu-latest
+#   move-to-testing:
+#     needs: extract-jira-key
+#     if: >
+#       github.event.action == 'closed'
+#       && github.event.pull_request.merged == true
+#       && needs.extract-jira-key.outputs.jira_key != ''
+#     runs-on: ubuntu-latest
 
-    steps:
-      - name: Move Jira issue to Testing
-        env:
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          JIRA_TRANSITION_ID_TESTING: ${{ secrets.JIRA_TRANSITION_ID_TESTING }}
-          JIRA_KEY: ${{ needs.extract-jira-key.outputs.jira_key }}
-        run: |
-          curl --fail --silent --show-error \
-            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-            -H "Content-Type: application/json" \
-            -X POST \
-            "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_KEY/transitions" \
-            -d "{\"transition\":{\"id\":\"$JIRA_TRANSITION_ID_TESTING\"}}"
+#     steps:
+#       - name: Move Jira issue to Testing
+#         env:
+#           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+#           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+#           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+#           JIRA_TRANSITION_ID_TESTING: ${{ secrets.JIRA_TRANSITION_ID_TESTING }}
+#           JIRA_KEY: ${{ needs.extract-jira-key.outputs.jira_key }}
+#         run: |
+#           curl --fail --silent --show-error \
+#             -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+#             -H "Content-Type: application/json" \
+#             -X POST \
+#             "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_KEY/transitions" \
+#             -d "{\"transition\":{\"id\":\"$JIRA_TRANSITION_ID_TESTING\"}}"
