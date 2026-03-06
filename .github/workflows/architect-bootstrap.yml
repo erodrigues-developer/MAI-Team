@@ -116,9 +116,22 @@ jobs:
             3. Keep content concise, specific, and internally consistent.
             4. If critical answers are missing, use `TBD` with recommended defaults.
             5. Do not modify unrelated files.
-            6. Save changes with commit message:
-               chore(bootstrap): generate context from architect interview
-            7. If direct push to default branch is blocked, create a bootstrap branch and open a PR.
+            6. Do not run git commands and do not try to create commits or PRs.
+               The workflow will handle PR creation automatically.
+
+      - name: Debug context files after generation
+        shell: bash
+        run: |
+          echo "=== git status (context files) ==="
+          git status --porcelain -- \
+            .ai/context/project-brief.md \
+            .ai/context/architecture.md \
+            .ai/context/stack.md \
+            .ai/context/coding-style.md \
+            .ai/context/security.md || true
+
+          echo "=== preview: project-brief.md ==="
+          sed -n '1,80p' .ai/context/project-brief.md || true
 
       - name: Detect context changes
         id: detect_changes
