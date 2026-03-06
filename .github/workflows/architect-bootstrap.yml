@@ -73,6 +73,12 @@ jobs:
     concurrency:
       group: architect-bootstrap-process-${{ github.event.issue.number }}
       cancel-in-progress: true
+    permissions:
+      id-token: write
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
