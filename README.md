@@ -729,3 +729,4 @@ Planned improvements you may add later:
 - Jira Cloud REST API v3 and basic auth docs
 
 These official references describe the workflow YAML model, branch protection behavior, status checks, multi-provider AI setup, and Jira Cloud API authentication.
+
