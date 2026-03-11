@@ -21,47 +21,143 @@ jobs:
     name: ai-review
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    env:
+      AI_REVIEW_PROMPT: |
+        You are the AI review agent for this repository.
+
+        Read and follow:
+        - .ai/agents/qa.md
+        - .ai/policies/workflows.yml
+        - .ai/context/project-brief.md if it exists
+        - .ai/context/architecture.md if it exists
+        - .ai/context/stack.md if it exists
+        - .ai/context/coding-style.md if it exists
+        - .ai/context/security.md if it exists
+
+        Review this pull request strictly.
+
+        Pull request title:
+        ${{ github.event.pull_request.title }}
+
+        Pull request body:
+        ${{ github.event.pull_request.body }}
+
+        Requirements:
+        - Evaluate scope control
+        - Evaluate risk of regressions
+        - Evaluate code quality
+        - Evaluate adherence to architecture and project context
+        - Evaluate whether tests are sufficient
+
+        Output:
+        - A review summary
+        - A clear verdict: PASS or FAIL
+        - Concrete required changes if FAIL
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve AI configuration
+        id: ai_config
+        shell: bash
+        env:
+          AI_PROVIDER: ${{ vars.AI_PROVIDER }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          AI_MODEL_VERSION: ${{ vars.AI_MODEL_VERSION }}
+          AI_MODEL_ID: ${{ vars.AI_MODEL_ID }}
+        run: .github/scripts/resolve-ai-config.sh
+
+      - name: Print AI configuration
+        shell: bash
+        run: |
+          echo "AI provider: ${{ steps.ai_config.outputs.provider }}"
+          echo "AI model: ${{ steps.ai_config.outputs.model_id }}"
+
       - name: Run Claude Code review
         id: claude_review
+        if: steps.ai_config.outputs.provider == 'claude'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            You are the AI review agent for this repository.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --model ${{ steps.ai_config.outputs.model_id }}
+          prompt: ${{ env.AI_REVIEW_PROMPT }}
 
-            Read and follow:
-            - .ai/agents/qa.md
-            - .ai/policies/workflows.yml
-            - .ai/context/project-brief.md if it exists
-            - .ai/context/architecture.md if it exists
-            - .ai/context/stack.md if it exists
-            - .ai/context/coding-style.md if it exists
-            - .ai/context/security.md if it exists
+      - name: Run Codex review
+        id: gpt_review
+        if: steps.ai_config.outputs.provider == 'gpt'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ steps.ai_config.outputs.model_id }}
+          sandbox: read-only
+          prompt: ${{ env.AI_REVIEW_PROMPT }}
 
-            Review this pull request strictly.
+      - name: Run Gemini CLI review
+        id: gemini_review
+        if: steps.ai_config.outputs.provider == 'gemini'
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_model: ${{ steps.ai_config.outputs.model_id }}
+          prompt: ${{ env.AI_REVIEW_PROMPT }}
 
-            Pull request title:
-            ${{ github.event.pull_request.title }}
+      - name: Run Grok review
+        id: grok_review
+        if: steps.ai_config.outputs.provider == 'grok'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.XAI_API_KEY }}
+          responses-api-endpoint: https://api.x.ai/v1/responses
+          model: ${{ steps.ai_config.outputs.model_id }}
+          sandbox: read-only
+          prompt: ${{ env.AI_REVIEW_PROMPT }}
 
-            Pull request body:
-            ${{ github.event.pull_request.body }}
+      - name: Capture review summary
+        id: review_summary
+        if: always()
+        shell: bash
+        env:
+          GPT_SUMMARY: ${{ steps.gpt_review.outputs['final-message'] }}
+          GEMINI_SUMMARY: ${{ steps.gemini_review.outputs.summary }}
+          GROK_SUMMARY: ${{ steps.grok_review.outputs['final-message'] }}
+        run: |
+          summary="${GPT_SUMMARY:-}"
+          if [ -z "$summary" ]; then summary="${GEMINI_SUMMARY:-}"; fi
+          if [ -z "$summary" ]; then summary="${GROK_SUMMARY:-}"; fi
+          if [ -n "$summary" ]; then
+            {
+              echo "summary<<EOF"
+              echo "$summary"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
-            Requirements:
-            - Evaluate scope control
-            - Evaluate risk of regressions
-            - Evaluate code quality
-            - Evaluate adherence to architecture and project context
-            - Evaluate whether tests are sufficient
+      - name: Publish review summary
+        if: steps.review_summary.outputs.summary != ''
+        uses: actions/github-script@v7
+        env:
+          REVIEW_SUMMARY: ${{ steps.review_summary.outputs.summary }}
+          AI_PROVIDER: ${{ steps.ai_config.outputs.provider }}
+          AI_MODEL_ID: ${{ steps.ai_config.outputs.model_id }}
+        with:
+          script: |
+            const reviewSummary = process.env.REVIEW_SUMMARY;
+            const aiProvider = process.env.AI_PROVIDER;
+            const aiModelId = process.env.AI_MODEL_ID;
 
-            Output:
-            - A review summary
-            - A clear verdict: PASS or FAIL
-            - Concrete required changes if FAIL
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                `AI review (${aiProvider}/${aiModelId})`,
+                "",
+                reviewSummary
+              ].join("\n")
+            });
 
       - name: Mark success
         if: success()

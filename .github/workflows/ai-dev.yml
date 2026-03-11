@@ -76,59 +76,146 @@ jobs:
     needs: validate-issue
     if: needs.validate-issue.outputs.can_proceed == 'true'
     runs-on: ubuntu-latest
+    env:
+      DEV_AGENT_PROMPT: |
+        You are the DEV agent for this repository.
+
+        Read and follow:
+        - .ai/agents/dev.md
+        - .ai/policies/workflows.yml
+        - .ai/context/project-brief.md if it exists
+        - .ai/context/architecture.md if it exists
+        - .ai/context/stack.md if it exists
+        - .ai/context/coding-style.md if it exists
+        - .ai/context/security.md if it exists
+        - docs/requirements/**
+        - docs/architecture/**
+        - docs/adr/**
+
+        Current GitHub issue:
+        - Number: ${{ github.event.issue.number }}
+        - Title: ${{ github.event.issue.title }}
+        - Body:
+        ${{ github.event.issue.body }}
+
+        Requirements:
+        1. First inspect the repository and identify the smallest viable implementation plan.
+        2. Implement only the minimum valid solution for this story.
+        3. Create or update tests when appropriate.
+        4. Prefer editing existing files over introducing new abstractions.
+        5. Do not create or modify generated directories such as `node_modules`, `dist`, `build`, `coverage`, or lockfiles unless the story explicitly requires dependency setup.
+        6. If dependencies are needed, edit the manifest files only; never commit installed dependency directories.
+        7. Keep scope minimal and avoid unrelated changes.
+        8. Stop as soon as the implementation and tests are complete enough for a PR.
+        9. Do not run git commands and do not create branch/PR.
+           The workflow will create the PR automatically.
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve AI configuration
+        id: ai_config
+        shell: bash
+        env:
+          AI_PROVIDER: ${{ vars.AI_PROVIDER }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          AI_MODEL_VERSION: ${{ vars.AI_MODEL_VERSION }}
+          AI_MODEL_ID: ${{ vars.AI_MODEL_ID }}
+        run: .github/scripts/resolve-ai-config.sh
+
+      - name: Print AI configuration
+        shell: bash
+        run: |
+          echo "AI provider: ${{ steps.ai_config.outputs.provider }}"
+          echo "AI model: ${{ steps.ai_config.outputs.model_id }}"
+
       - name: Run Claude Code as Dev Agent
         id: claude_dev
+        if: steps.ai_config.outputs.provider == 'claude'
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           show_full_output: true
           claude_args: |
-            --max-turns 30
+            --model ${{ steps.ai_config.outputs.model_id }}
+            --max-turns 50
             --allowedTools Edit,Read,Write,Bash
-          prompt: |
-            You are the DEV agent for this repository.
+          prompt: ${{ env.DEV_AGENT_PROMPT }}
 
-            Read and follow:
-            - .ai/agents/dev.md
-            - .ai/policies/workflows.yml
-            - .ai/context/project-brief.md if it exists
-            - .ai/context/architecture.md if it exists
-            - .ai/context/stack.md if it exists
-            - .ai/context/coding-style.md if it exists
-            - .ai/context/security.md if it exists
-            - docs/requirements/**
-            - docs/architecture/**
-            - docs/adr/**
+      - name: Run Codex as Dev Agent
+        id: gpt_dev
+        if: steps.ai_config.outputs.provider == 'gpt'
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ steps.ai_config.outputs.model_id }}
+          sandbox: workspace-write
+          prompt: ${{ env.DEV_AGENT_PROMPT }}
 
-            Current GitHub issue:
-            - Number: ${{ github.event.issue.number }}
-            - Title: ${{ github.event.issue.title }}
-            - Body:
-            ${{ github.event.issue.body }}
+      - name: Run Gemini CLI as Dev Agent
+        id: gemini_dev
+        if: steps.ai_config.outputs.provider == 'gemini'
+        continue-on-error: true
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_model: ${{ steps.ai_config.outputs.model_id }}
+          prompt: ${{ env.DEV_AGENT_PROMPT }}
 
-            Requirements:
-            1. Implement the minimum valid solution for this story.
-            2. Create or update tests when appropriate.
-            3. Keep scope minimal and avoid unrelated changes.
-            4. Do not run git commands and do not create branch/PR.
-               The workflow will create the PR automatically.
+      - name: Run Grok as Dev Agent
+        id: grok_dev
+        if: steps.ai_config.outputs.provider == 'grok'
+        continue-on-error: true
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.XAI_API_KEY }}
+          responses-api-endpoint: https://api.x.ai/v1/responses
+          model: ${{ steps.ai_config.outputs.model_id }}
+          sandbox: workspace-write
+          prompt: ${{ env.DEV_AGENT_PROMPT }}
+
+      - name: Capture AI execution outcome
+        id: ai_outcome
+        if: always()
+        shell: bash
+        env:
+          CLAUDE_OUTCOME: ${{ steps.claude_dev.outcome }}
+          GPT_OUTCOME: ${{ steps.gpt_dev.outcome }}
+          GEMINI_OUTCOME: ${{ steps.gemini_dev.outcome }}
+          GROK_OUTCOME: ${{ steps.grok_dev.outcome }}
+        run: |
+          outcome="${CLAUDE_OUTCOME:-}"
+          if [ -z "$outcome" ]; then outcome="${GPT_OUTCOME:-}"; fi
+          if [ -z "$outcome" ]; then outcome="${GEMINI_OUTCOME:-}"; fi
+          if [ -z "$outcome" ]; then outcome="${GROK_OUTCOME:-}"; fi
+          if [ -z "$outcome" ]; then outcome="skipped"; fi
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
 
       - name: Debug repository changes after dev generation
         shell: bash
         run: |
           echo "=== git status ==="
-          git status --porcelain || true
+          git status --porcelain -- \
+            . \
+            ':(exclude)node_modules' \
+            ':(exclude)dist' \
+            ':(exclude)build' \
+            ':(exclude)coverage' || true
 
       - name: Detect code changes
         id: detect_changes
         shell: bash
         run: |
-          CHANGED_COUNT=$(git status --porcelain | wc -l | tr -d ' ')
+          CHANGED_COUNT=$(git status --porcelain -- \
+            . \
+            ':(exclude)node_modules' \
+            ':(exclude)dist' \
+            ':(exclude)build' \
+            ':(exclude)coverage' | wc -l | tr -d ' ')
           if [ "$CHANGED_COUNT" -gt 0 ]; then
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
           else
@@ -157,15 +244,24 @@ jobs:
         env:
           HAS_CHANGES: ${{ steps.detect_changes.outputs.has_changes }}
           PR_URL: ${{ steps.create_pr.outputs.pull-request-url }}
+          AI_OUTCOME: ${{ steps.ai_outcome.outputs.outcome }}
+          AI_PROVIDER: ${{ steps.ai_config.outputs.provider }}
+          AI_MODEL_ID: ${{ steps.ai_config.outputs.model_id }}
         with:
           script: |
             const hasChanges = process.env.HAS_CHANGES === "true";
             const prUrl = process.env.PR_URL;
+            const aiOutcome = process.env.AI_OUTCOME;
+            const aiProvider = process.env.AI_PROVIDER;
+            const aiModelId = process.env.AI_MODEL_ID;
             const resultMsg = hasChanges
               ? (prUrl
                   ? `Implementação gerada e PR criado: ${prUrl}`
                   : "Implementação gerada com alterações, mas sem URL de PR disponível.")
               : "Nenhuma alteração de código foi detectada; PR não criado.";
+            const executionMsg = aiOutcome === "success"
+              ? `Execução do agente ${aiProvider} (${aiModelId}) concluída com sucesso.`
+              : `Execução do agente ${aiProvider} (${aiModelId}) terminou com status \`${aiOutcome}\`.`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -174,6 +270,14 @@ jobs:
               body: [
                 "AI Dev Agent processado.",
                 "",
+                executionMsg,
                 resultMsg
               ].join("\n")
             })
+
+      - name: Fail only when AI execution failed and no code changes were produced
+        if: steps.ai_outcome.outputs.outcome != 'success' && steps.detect_changes.outputs.has_changes != 'true'
+        shell: bash
+        run: |
+          echo "AI execution did not complete successfully and no code changes were generated."
+          exit 1

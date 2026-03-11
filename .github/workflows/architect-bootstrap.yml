@@ -80,49 +80,97 @@ jobs:
       pull-requests: write
       actions: write
     runs-on: ubuntu-latest
+    env:
+      ARCHITECT_BOOTSTRAP_PROMPT: |
+        You are the Architect Agent running bootstrap for this repository.
+
+        Read and follow:
+        - .ai/agents/architect.md
+        - .ai/bootstrap/architecture-interview.md
+        - .ai/context/project-brief.md (template)
+        - .ai/context/architecture.md (template)
+        - .ai/context/stack.md (template)
+        - .ai/context/coding-style.md (template)
+        - .ai/context/security.md (template)
+
+        Source of truth for interview answers is the issue comment body below:
+        ---
+        ${{ github.event.comment.body }}
+        ---
+
+        Tasks:
+        1. Parse the answers from the comment.
+        2. Generate/update ONLY:
+           - .ai/context/project-brief.md
+           - .ai/context/architecture.md
+           - .ai/context/stack.md
+           - .ai/context/coding-style.md
+           - .ai/context/security.md
+        3. Keep content concise, specific, and internally consistent.
+        4. If critical answers are missing, use `TBD` with recommended defaults.
+        5. Do not modify unrelated files.
+        6. Do not run git commands and do not try to create commits or PRs.
+           The workflow will handle PR creation automatically.
+        7. Prefer file editing tools over shell commands when updating context files.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate context files from architect answers
+      - name: Resolve AI configuration
+        id: ai_config
+        shell: bash
+        env:
+          AI_PROVIDER: ${{ vars.AI_PROVIDER }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          AI_MODEL_VERSION: ${{ vars.AI_MODEL_VERSION }}
+          AI_MODEL_ID: ${{ vars.AI_MODEL_ID }}
+        run: .github/scripts/resolve-ai-config.sh
+
+      - name: Print AI configuration
+        shell: bash
+        run: |
+          echo "AI provider: ${{ steps.ai_config.outputs.provider }}"
+          echo "AI model: ${{ steps.ai_config.outputs.model_id }}"
+
+      - name: Generate context files with Claude
+        if: steps.ai_config.outputs.provider == 'claude'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           show_full_output: true
           claude_args: |
+            --model ${{ steps.ai_config.outputs.model_id }}
             --max-turns 20
             --allowedTools Edit,Read,Write,Bash
-          prompt: |
-            You are the Architect Agent running bootstrap for this repository.
+          prompt: ${{ env.ARCHITECT_BOOTSTRAP_PROMPT }}
 
-            Read and follow:
-            - .ai/agents/architect.md
-            - .ai/bootstrap/architecture-interview.md
-            - .ai/context/project-brief.md (template)
-            - .ai/context/architecture.md (template)
-            - .ai/context/stack.md (template)
-            - .ai/context/coding-style.md (template)
-            - .ai/context/security.md (template)
+      - name: Generate context files with Codex
+        if: steps.ai_config.outputs.provider == 'gpt'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          model: ${{ steps.ai_config.outputs.model_id }}
+          sandbox: workspace-write
+          prompt: ${{ env.ARCHITECT_BOOTSTRAP_PROMPT }}
 
-            Source of truth for interview answers is the issue comment body below:
-            ---
-            ${{ github.event.comment.body }}
-            ---
+      - name: Generate context files with Gemini CLI
+        if: steps.ai_config.outputs.provider == 'gemini'
+        uses: google-github-actions/run-gemini-cli@v0
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_model: ${{ steps.ai_config.outputs.model_id }}
+          prompt: ${{ env.ARCHITECT_BOOTSTRAP_PROMPT }}
 
-            Tasks:
-            1. Parse the answers from the comment.
-            2. Generate/update ONLY:
-               - .ai/context/project-brief.md
-               - .ai/context/architecture.md
-               - .ai/context/stack.md
-               - .ai/context/coding-style.md
-               - .ai/context/security.md
-            3. Keep content concise, specific, and internally consistent.
-            4. If critical answers are missing, use `TBD` with recommended defaults.
-            5. Do not modify unrelated files.
-            6. Do not run git commands and do not try to create commits or PRs.
-               The workflow will handle PR creation automatically.
-            7. Prefer file editing tools over shell commands when updating context files.
+      - name: Generate context files with Grok
+        if: steps.ai_config.outputs.provider == 'grok'
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.XAI_API_KEY }}
+          responses-api-endpoint: https://api.x.ai/v1/responses
+          model: ${{ steps.ai_config.outputs.model_id }}
+          sandbox: workspace-write
+          prompt: ${{ env.ARCHITECT_BOOTSTRAP_PROMPT }}
 
       - name: Debug context files after generation
         shell: bash

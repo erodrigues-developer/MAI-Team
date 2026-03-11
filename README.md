@@ -52,9 +52,12 @@ This keeps human oversight while automating repetitive engineering work.
 │   └── policies
 │       └── workflows.yml
 ├── .github
+│   ├── scripts
+│   │   └── resolve-ai-config.sh
 │   └── workflows
 │       ├── ai-dev.yml
 │       ├── ai-review.yml
+│       ├── architect-bootstrap.yml
 │       ├── bootstrap-labels.yml
 │       ├── jira-sync.yml
 │       └── qa-agent.yml
@@ -98,6 +101,11 @@ This project uses the following workflow model:
 - creates/updates repository labels from `/.ai/bootstrap/labels.yml`
 - controlled by `/.ai/bootstrap/bootstrap-config.yml`
 
+### `architect-bootstrap.yml`
+
+- triggered from issue bootstrap flow
+- generates `.ai/context/*` from architect interview answers
+
 ---
 
 ## Recommended delivery model
@@ -120,11 +128,13 @@ Before running MAI Team, make sure you have:
 - repository admin access
 - a Jira Cloud project
 - an Atlassian API token
-- either:
-  - an Anthropic API key, or
-  - another supported Claude Code authentication method
+- one AI provider configured:
+  - Claude
+  - GPT / Codex
+  - Gemini
+  - Grok
 
-The official Claude Code Action quickstart recommends installing the Claude GitHub App and adding the required GitHub secrets. It also notes that repository admin access is required to install the app and add secrets.
+The workflows now resolve the provider from GitHub Actions variables, so the same repository can switch between Claude, GPT, Gemini, or Grok without changing workflow files.
 
 ---
 
@@ -134,6 +144,7 @@ Create these files:
 
 - `.github/workflows/ai-dev.yml`
 - `.github/workflows/ai-review.yml`
+- `.github/workflows/architect-bootstrap.yml`
 - `.github/workflows/bootstrap-labels.yml`
 - `.github/workflows/jira-sync.yml`
 - `.github/workflows/qa-agent.yml`
@@ -142,38 +153,54 @@ Place in them the workflow definitions you chose for the project.
 
 ---
 
-## Step 2 - Set up Claude Code for GitHub
+## Step 2 - Choose the AI provider and model
 
-### Option A - Recommended quickstart
+Go to:
 
-The official Claude Code Action quickstart says the easiest setup path is to open Claude Code in the terminal and run:
+`GitHub repository -> Settings -> Secrets and variables -> Actions`
 
-```bash
-claude
-```
+Create these repository variables:
 
-Then inside Claude Code:
+- `AI_PROVIDER`
+- `AI_MODEL`
+- `AI_MODEL_VERSION` (optional)
+- `AI_MODEL_ID` (optional override)
+
+### How model resolution works
+
+The workflows resolve the effective model in this order:
+
+1. `AI_MODEL_ID`
+2. `AI_MODEL` + `AI_MODEL_VERSION`
+3. provider default
+
+This lets you choose both a model family and a version, while still supporting providers that expose a single exact model identifier.
+
+### Example combinations
 
 ```text
-/install-github-app
+AI_PROVIDER=claude
+AI_MODEL=claude-sonnet
+AI_MODEL_VERSION=4-20250514
+# resolved model_id => claude-sonnet-4-20250514
+
+AI_PROVIDER=gpt
+AI_MODEL=gpt-5
+AI_MODEL_VERSION=mini
+# resolved model_id => gpt-5-mini
+
+AI_PROVIDER=gemini
+AI_MODEL=gemini-2.5-pro
+AI_MODEL_VERSION=preview-03-25
+# resolved model_id => gemini-2.5-pro-preview-03-25
+
+AI_PROVIDER=grok
+AI_MODEL=grok-code-fast
+AI_MODEL_VERSION=1
+# resolved model_id => grok-code-fast-1
 ```
 
-This guides you through installing the Claude GitHub App and required secrets. That quickstart is available for direct Anthropic API users.
-
-### Option B - Manual setup
-
-If you want to configure manually:
-
-Install the Claude GitHub App on your repository:
-
-- GitHub App: https://github.com/apps/claude
-
-Add one of the supported authentication secrets to your repository:
-
-- `ANTHROPIC_API_KEY`
-- or `CLAUDE_CODE_OAUTH_TOKEN`
-
-The official setup docs list these secret options for authentication.
+If a provider uses a naming scheme that does not split cleanly into model + version, set the exact API identifier in `AI_MODEL_ID`.
 
 ---
 
@@ -183,15 +210,24 @@ Go to:
 
 `GitHub repository -> Settings -> Secrets and variables -> Actions`
 
-Create the following secrets.
+Create the secrets required by the provider you selected.
 
-### Required for Claude
+### Claude
 
 - `ANTHROPIC_API_KEY`
+- or `CLAUDE_CODE_OAUTH_TOKEN`
 
-Or, if using OAuth:
+### GPT / Codex
 
-- `CLAUDE_CODE_OAUTH_TOKEN`
+- `OPENAI_API_KEY`
+
+### Gemini
+
+- `GEMINI_API_KEY`
+
+### Grok
+
+- `XAI_API_KEY`
 
 ### Required for Jira sync
 
@@ -204,6 +240,10 @@ Or, if using OAuth:
 ### Example values
 
 ```text
+AI_PROVIDER=claude
+AI_MODEL=claude-sonnet
+AI_MODEL_VERSION=4-20250514
+
 JIRA_BASE_URL=https://your-company.atlassian.net
 JIRA_EMAIL=you@company.com
 JIRA_API_TOKEN=your_atlassian_api_token
@@ -604,15 +644,20 @@ Most likely the transition ID is wrong for your Jira workflow. Query the transit
 - `JIRA_TRANSITION_ID_IN_REVIEW`
 - `JIRA_TRANSITION_ID_TESTING`
 
-### Claude workflow fails immediately
+### AI workflow fails immediately
 
 Check:
 
-- the Claude GitHub App is installed
-- `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` exists
+- `AI_PROVIDER` matches the configured secret
+- `AI_MODEL`, `AI_MODEL_VERSION`, or `AI_MODEL_ID` resolves to a valid provider model
 - repository Actions permissions are enabled
+- required provider secret exists:
+  - Claude: `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`
+  - GPT: `OPENAI_API_KEY`
+  - Gemini: `GEMINI_API_KEY`
+  - Grok: `XAI_API_KEY`
 
-The official Claude Code Action docs describe setup through the GitHub App and required secrets.
+If you are using Claude, also confirm the Claude GitHub App is installed when your chosen auth flow requires it.
 
 ---
 
@@ -624,8 +669,8 @@ If you are starting from zero, do it in this order:
 2. create agent files
 3. create bootstrap files (`.ai/bootstrap/*`)
 4. create workflow files
-5. install Claude GitHub App
-6. create GitHub secrets
+5. choose AI provider + model variables
+6. create provider and Jira secrets
 7. create Jira API token
 8. discover Jira transition IDs
 9. run architect bootstrap interview and generate context files
@@ -643,8 +688,9 @@ Use this checklist to know when MAI Team is operational:
 - [ ] repo created
 - [ ] `.github/workflows/*.yml` files added
 - [ ] `bootstrap-labels.yml` workflow added
-- [ ] Claude GitHub App installed
-- [ ] `ANTHROPIC_API_KEY` secret created
+- [ ] `AI_PROVIDER` configured
+- [ ] `AI_MODEL` or `AI_MODEL_ID` configured
+- [ ] provider secret created
 - [ ] Jira secrets created
 - [ ] transition IDs discovered
 - [ ] branch protection configured
@@ -676,7 +722,10 @@ Planned improvements you may add later:
 - GitHub Actions workflow syntax: GitHub Docs
 - GitHub branch protection rules: GitHub Docs
 - GitHub status checks: GitHub Docs
-- Claude Code Action official repository and setup docs
+- Anthropic Claude Code Action official repository and setup docs
+- OpenAI Codex GitHub Action official repository and setup docs
+- Google Gemini CLI GitHub Action official repository and setup docs
+- xAI API reference
 - Jira Cloud REST API v3 and basic auth docs
 
-These official references describe the workflow YAML model, branch protection behavior, status checks, Claude Code Action setup, and Jira Cloud API authentication.
+These official references describe the workflow YAML model, branch protection behavior, status checks, multi-provider AI setup, and Jira Cloud API authentication.
