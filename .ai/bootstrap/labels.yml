@@ -19,13 +19,17 @@ labels:
     color: "f59e0b"
     description: "Development can start"
 
+  - name: "dev:fix_review"
+    color: "f97316"
+    description: "Address AI or human review feedback on the existing PR"
+
   - name: "pr:opened"
     color: "38bdf8"
     description: "Pull request was opened"
 
-  - name: "testing"
+  - name: "ready_for_tests"
     color: "eab308"
-    description: "Work item is in testing phase"
+    description: "Ready for human QA validation in Jira"
 
   - name: "ready_for_publish"
     color: "22c55e"

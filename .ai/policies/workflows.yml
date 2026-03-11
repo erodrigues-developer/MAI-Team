@@ -5,13 +5,13 @@ states:
     - backlog
     - ready
     - dev:in_progress
+    - dev:fix_review
     - requirements:approved
     - ui:approved
   automatic:
     - pr:opened
     - pr:ai_reviewed
-    - testing
-    - ready_for_publish
+    - ready_for_tests
 
 transitions:
   - from: dev:in_progress
@@ -21,22 +21,17 @@ transitions:
 
   - from: pr:opened
     to: pr:ai_reviewed
-    trigger: github.pull_request.opened
+    trigger: github.checks.ai_review_passed
     actor: ai
 
   - from: pr:ai_reviewed
-    to: testing
-    trigger: github.pull_request.merged
-    actor: ai
-
-  - from: testing
-    to: ready_for_publish
+    to: ready_for_tests
     trigger: github.checks.qa_passed
     actor: ai
 
 rules:
   branch_naming: "feature/{jira_key}-{slug}"
-  pr_base_branch: "main"
+  pr_base_branch: "dev"
   required_human_approvals: 1
   required_ai_checks:
     - ai-review

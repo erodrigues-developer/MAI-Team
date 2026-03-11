@@ -1,26 +1,310 @@
 name: QA Agent
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to validate
+        required: true
+        type: string
 
 permissions:
+  checks: read
   contents: read
   pull-requests: write
+  issues: write
 
 concurrency:
-  group: qa-check-${{ github.event.pull_request.number }}
+  group: qa-check-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
+  resolve-pr-context:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.review.state == 'approved' &&
+        github.event.pull_request.base.ref == 'dev'
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      pr_title: ${{ steps.resolve.outputs.pr_title }}
+      pr_body: ${{ steps.resolve.outputs.pr_body }}
+      pr_draft: ${{ steps.resolve.outputs.pr_draft }}
+      pr_base_ref: ${{ steps.resolve.outputs.pr_base_ref }}
+      pr_head_ref: ${{ steps.resolve.outputs.pr_head_ref }}
+      pr_validation_sha: ${{ steps.resolve.outputs.pr_validation_sha }}
+      approved_sha: ${{ steps.resolve.outputs.approved_sha }}
+      issue_number: ${{ steps.resolve.outputs.issue_number }}
+    steps:
+      - name: Resolve PR context
+        id: resolve
+        uses: actions/github-script@v7
+        env:
+          INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
+        with:
+          script: |
+            let pr;
+            let approvedSha = "";
+            if (context.eventName === "workflow_dispatch") {
+              const pullNumber = Number(process.env.INPUT_PR_NUMBER);
+              const response = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullNumber
+              });
+              pr = response.data;
+
+              const reviewsResponse = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pullNumber,
+                per_page: 100
+              });
+
+              const latestApproval = reviewsResponse.data
+                .filter((review) => review.state === "APPROVED" && review.commit_id)
+                .sort((a, b) => new Date(b.submitted_at || b.created_at || 0) - new Date(a.submitted_at || a.created_at || 0))[0];
+
+              approvedSha = latestApproval?.commit_id || "";
+            } else {
+              pr = context.payload.pull_request;
+              approvedSha = context.payload.review.commit_id || "";
+            }
+
+            core.setOutput("pr_number", String(pr.number));
+            core.setOutput("pr_title", pr.title || "");
+            core.setOutput("pr_body", pr.body || "");
+            core.setOutput("pr_draft", String(Boolean(pr.draft)));
+            core.setOutput("pr_base_ref", pr.base.ref || "");
+            core.setOutput("pr_head_ref", pr.head.ref || "");
+            core.setOutput("pr_validation_sha", pr.head.sha || "");
+            core.setOutput("approved_sha", approvedSha);
+
+            const match = (pr.body || "").match(/Source issue:\s*#(\d+)/i);
+            if (match) {
+              core.setOutput("issue_number", match[1]);
+            }
+
+  evaluate-qa-gates:
+    needs: resolve-pr-context
+    runs-on: ubuntu-latest
+    outputs:
+      qa_ready: ${{ steps.gates.outputs.qa_ready }}
+      gate_message: ${{ steps.gates.outputs.gate_message }}
+    steps:
+      - name: Evaluate AI review and human approval gates
+        id: gates
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MAI_BOT_TOKEN || github.token }}
+          script: |
+            const prNumber = Number("${{ needs.resolve-pr-context.outputs.pr_number }}");
+            const approvedSha = "${{ needs.resolve-pr-context.outputs.approved_sha }}";
+            const query = `
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    number
+                    state
+                    isDraft
+                    reviewDecision
+                    mergeable
+                    headRefOid
+                    baseRefName
+                  }
+                }
+              }
+            `;
+
+            const result = await github.graphql(query, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              number: prNumber,
+            });
+
+            const pr = result.repository.pullRequest;
+            const blocking = [];
+            const waiting = [];
+            let aiReviewPassed = false;
+
+            if (!pr) {
+              blocking.push("Pull request not found.");
+            } else {
+              if (pr.state !== "OPEN") blocking.push(`Pull request is ${pr.state.toLowerCase()}.`);
+              if (pr.isDraft) blocking.push("Pull request is still a draft.");
+              if (pr.baseRefName !== "dev") blocking.push(`Pull request base branch is ${pr.baseRefName}, expected dev.`);
+              if (approvedSha && pr.headRefOid !== approvedSha) {
+                waiting.push("The pull request head changed after the human approval that triggered QA.");
+              }
+              if (pr.reviewDecision !== "APPROVED") {
+                waiting.push(`Review decision is ${pr.reviewDecision || "unknown"}, expected APPROVED.`);
+              }
+
+              const checks = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pr.headRefOid,
+                filter: "latest",
+                per_page: 100
+              });
+
+              const aiReviewRuns = checks.data.check_runs
+                .filter((run) => run.name === "ai-review")
+                .sort((a, b) => new Date(b.completed_at || b.started_at || 0) - new Date(a.completed_at || a.started_at || 0));
+              const aiReviewRun = aiReviewRuns[0];
+
+              if (aiReviewRun?.status === "completed" && aiReviewRun?.conclusion === "success") {
+                aiReviewPassed = true;
+              } else if (aiReviewRun?.status === "completed") {
+                waiting.push(`AI review concluded with ${aiReviewRun.conclusion || "unknown"}.`);
+              } else if (aiReviewRun?.status) {
+                waiting.push(`AI review is still ${aiReviewRun.status}.`);
+              } else {
+                waiting.push("AI review has not produced a completed check on the current PR head yet.");
+              }
+            }
+
+            const qaReady = blocking.length === 0 && waiting.length === 0 && aiReviewPassed;
+            const message = [...blocking, ...waiting].join(" ");
+
+            core.setOutput("qa_ready", qaReady ? "true" : "false");
+            core.setOutput("gate_message", message);
+            core.info(qaReady ? "QA is ready to run." : `QA is waiting: ${message}`);
+
   qa-check:
+    needs:
+      - resolve-pr-context
+      - evaluate-qa-gates
     name: qa-check
-    if: github.event.pull_request.draft == false
+    if: >
+      needs.resolve-pr-context.outputs.pr_draft != 'true' &&
+      needs.resolve-pr-context.outputs.pr_validation_sha != ''
     runs-on: ubuntu-latest
 
     steps:
+      - name: Print QA context
+        shell: bash
+        run: |
+          echo "QA triggered for PR #${{ needs.resolve-pr-context.outputs.pr_number }}"
+          echo "Base ref: ${{ needs.resolve-pr-context.outputs.pr_base_ref }}"
+          echo "Head ref: ${{ needs.resolve-pr-context.outputs.pr_head_ref }}"
+          echo "Validation SHA: ${{ needs.resolve-pr-context.outputs.pr_validation_sha }}"
+          echo "Approved SHA: ${{ needs.resolve-pr-context.outputs.approved_sha }}"
+
+      - name: Stop until AI review and human approval are both satisfied
+        if: needs.evaluate-qa-gates.outputs.qa_ready != 'true'
+        shell: bash
+        run: |
+          echo "${{ needs.evaluate-qa-gates.outputs.gate_message }}"
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-pr-context.outputs.pr_validation_sha }}
+
+      - name: Verify merge preconditions
+        id: preconditions
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MAI_BOT_TOKEN || github.token }}
+          script: |
+            const prNumber = Number("${{ needs.resolve-pr-context.outputs.pr_number }}");
+            const approvedSha = "${{ needs.resolve-pr-context.outputs.approved_sha }}";
+            const query = `
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    number
+                    state
+                    isDraft
+                    reviewDecision
+                    mergeable
+                    headRefOid
+                    baseRefName
+                  }
+                }
+              }
+            `;
+
+            const result = await github.graphql(query, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              number: prNumber,
+            });
+
+            const pr = result.repository.pullRequest;
+            const failures = [];
+
+            if (!pr) {
+              failures.push("Pull request not found.");
+            } else {
+              if (pr.state !== "OPEN") failures.push(`Pull request is ${pr.state.toLowerCase()}.`);
+              if (pr.isDraft) failures.push("Pull request is still a draft.");
+              if (pr.baseRefName !== "dev") failures.push(`Pull request base branch is ${pr.baseRefName}, expected dev.`);
+              if (pr.reviewDecision !== "APPROVED") failures.push(`Review decision is ${pr.reviewDecision || "unknown"}, expected APPROVED.`);
+              if (pr.mergeable !== "MERGEABLE") failures.push(`Pull request mergeability is ${pr.mergeable}.`);
+              if (approvedSha && pr.headRefOid !== approvedSha) {
+                failures.push("The pull request head changed after the human approval that triggered QA.");
+              }
+
+              const checks = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pr.headRefOid,
+                filter: "latest",
+                per_page: 100
+              });
+
+              const aiReviewRuns = checks.data.check_runs
+                .filter((run) => run.name === "ai-review")
+                .sort((a, b) => new Date(b.completed_at || b.started_at || 0) - new Date(a.completed_at || a.started_at || 0));
+              const aiReviewRun = aiReviewRuns[0];
+
+              if (!aiReviewRun) {
+                failures.push("AI review has not produced a completed check on the current PR head yet.");
+              } else if (aiReviewRun.status !== "completed" || aiReviewRun.conclusion !== "success") {
+                failures.push(`AI review status is ${aiReviewRun.status}/${aiReviewRun.conclusion || "unknown"}, expected completed/success.`);
+              }
+            }
+
+            core.setOutput("ok", failures.length === 0 ? "true" : "false");
+            if (failures.length > 0) {
+              core.setOutput("message", failures.join(" "));
+            }
+
+      - name: Comment when merge preconditions are not met
+        if: steps.preconditions.outputs.ok != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = Number("${{ needs.resolve-pr-context.outputs.pr_number }}");
+            const message = "${{ steps.preconditions.outputs.message }}";
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: [
+                "QA automation did not run because merge preconditions were not satisfied.",
+                "",
+                message
+              ].join("\n")
+            });
+
+      - name: Stop when merge preconditions are not met
+        if: steps.preconditions.outputs.ok != 'true'
+        shell: bash
+        run: exit 1
+
+      - name: Mark validation phase
+        if: success()
+        shell: bash
+        run: echo "FAILURE_CLASS=validation" >> "$GITHUB_ENV"
 
       - name: Detect Node project
         id: detect_node
@@ -56,3 +340,195 @@ jobs:
         run: |
           echo "No supported stack detected yet."
           echo "This job is passing temporarily because the project bootstrap is still in progress."
+
+      - name: Request new dev cycle after QA failure
+        if: failure() && env.FAILURE_CLASS == 'validation' && needs.resolve-pr-context.outputs.issue_number != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = Number("${{ needs.resolve-pr-context.outputs.issue_number }}");
+            const prNumber = Number("${{ needs.resolve-pr-context.outputs.pr_number }}");
+            const body = [
+              `QA automation failed for PR #${prNumber}.`,
+              "",
+              "A new development cycle was requested with label `dev:fix_review`."
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body
+            });
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              labels: ["dev:fix_review"]
+            });
+
+  qa-complete:
+    needs:
+      - resolve-pr-context
+      - evaluate-qa-gates
+      - qa-check
+    if: needs.qa-check.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify merge preconditions again
+        id: preconditions
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MAI_BOT_TOKEN || github.token }}
+          script: |
+            const prNumber = Number("${{ needs.resolve-pr-context.outputs.pr_number }}");
+            const approvedSha = "${{ needs.resolve-pr-context.outputs.approved_sha }}";
+            const query = `
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    number
+                    state
+                    isDraft
+                    reviewDecision
+                    mergeable
+                    headRefOid
+                    baseRefName
+                  }
+                }
+              }
+            `;
+
+            const result = await github.graphql(query, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              number: prNumber,
+            });
+
+            const pr = result.repository.pullRequest;
+            const failures = [];
+
+            if (!pr) {
+              failures.push("Pull request not found.");
+            } else {
+              if (pr.state !== "OPEN") failures.push(`Pull request is ${pr.state.toLowerCase()}.`);
+              if (pr.isDraft) failures.push("Pull request is still a draft.");
+              if (pr.baseRefName !== "dev") failures.push(`Pull request base branch is ${pr.baseRefName}, expected dev.`);
+              if (pr.reviewDecision !== "APPROVED") failures.push(`Review decision is ${pr.reviewDecision || "unknown"}, expected APPROVED.`);
+              if (pr.mergeable !== "MERGEABLE") failures.push(`Pull request mergeability is ${pr.mergeable}.`);
+              if (approvedSha && pr.headRefOid !== approvedSha) {
+                failures.push("The pull request head changed after the human approval that triggered QA.");
+              }
+
+              const checks = await github.rest.checks.listForRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: pr.headRefOid,
+                filter: "latest",
+                per_page: 100
+              });
+
+              const aiReviewRuns = checks.data.check_runs
+                .filter((run) => run.name === "ai-review")
+                .sort((a, b) => new Date(b.completed_at || b.started_at || 0) - new Date(a.completed_at || a.started_at || 0));
+              const aiReviewRun = aiReviewRuns[0];
+
+              if (!aiReviewRun) {
+                failures.push("AI review has not produced a completed check on the current PR head yet.");
+              } else if (aiReviewRun.status !== "completed" || aiReviewRun.conclusion !== "success") {
+                failures.push(`AI review status is ${aiReviewRun.status}/${aiReviewRun.conclusion || "unknown"}, expected completed/success.`);
+              }
+            }
+
+            core.setOutput("ok", failures.length === 0 ? "true" : "false");
+            if (failures.length > 0) {
+              core.setOutput("message", failures.join(" "));
+            }
+
+      - name: Stop when merge preconditions are not met
+        if: steps.preconditions.outputs.ok != 'true'
+        shell: bash
+        run: |
+          echo "${{ steps.preconditions.outputs.message }}"
+          exit 1
+
+      - name: Merge pull request into dev
+        id: merge_pr
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.MAI_BOT_TOKEN || github.token }}
+          script: |
+            const prNumber = Number("${{ needs.resolve-pr-context.outputs.pr_number }}");
+            const response = await github.rest.pulls.merge({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+              merge_method: "squash",
+              sha: "${{ needs.resolve-pr-context.outputs.pr_validation_sha }}"
+            });
+
+            core.setOutput("merged", response.data.merged ? "true" : "false");
+            core.setOutput("message", response.data.message || "");
+
+      - name: Stop when merge did not complete
+        if: steps.merge_pr.outputs.merged != 'true'
+        shell: bash
+        run: |
+          echo "Pull request merge did not complete."
+          echo "${{ steps.merge_pr.outputs.message }}"
+          exit 1
+
+      - name: Extract Jira key from PR context
+        id: extract_jira
+        shell: bash
+        run: |
+          TEXT="${{ needs.resolve-pr-context.outputs.pr_title }} ${{ needs.resolve-pr-context.outputs.pr_head_ref }}"
+          JIRA_KEY=$(echo "$TEXT" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -n 1 || true)
+          echo "jira_key=$JIRA_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Move Jira issue to Ready for Tests
+        if: steps.extract_jira.outputs.jira_key != ''
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_TRANSITION_ID_READY_FOR_TESTS: ${{ secrets.JIRA_TRANSITION_ID_READY_FOR_TESTS }}
+          JIRA_TRANSITION_ID_TESTING: ${{ secrets.JIRA_TRANSITION_ID_TESTING }}
+          JIRA_KEY: ${{ steps.extract_jira.outputs.jira_key }}
+        run: |
+          TRANSITION_ID="${JIRA_TRANSITION_ID_READY_FOR_TESTS:-$JIRA_TRANSITION_ID_TESTING}"
+
+          if [ -z "$TRANSITION_ID" ]; then
+            echo "Missing Jira transition id for Ready for Tests."
+            exit 1
+          fi
+
+          curl --fail --silent --show-error \
+            -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            "$JIRA_BASE_URL/rest/api/3/issue/$JIRA_KEY/transitions" \
+            -d "{\"transition\":{\"id\":\"$TRANSITION_ID\"}}"
+
+      - name: Comment when merge or Jira completion fails
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = Number("${{ needs.resolve-pr-context.outputs.pr_number }}");
+            const preconditionMessage = "${{ steps.preconditions.outputs.message }}";
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: [
+                "QA validation passed, but the automation could not complete merge or Jira synchronization.",
+                "",
+                preconditionMessage,
+                preconditionMessage ? "" : null,
+                "Please inspect the workflow logs and complete the merge/Jira update manually if needed."
+              ].filter(Boolean).join("\n")
+            });

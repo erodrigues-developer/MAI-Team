@@ -26,9 +26,9 @@ jobs:
         with:
           script: |
             const body = [
-              "Architect bootstrap iniciado.",
+              "Architect bootstrap started.",
               "",
-              "Responda neste issue com um comentário iniciando com `/architect-bootstrap` e preenchendo o template abaixo:",
+              "Reply in this issue with a comment that starts with `/architect-bootstrap` and completes the template below:",
               "",
               "```md",
               "/architect-bootstrap",
@@ -46,14 +46,14 @@ jobs:
               "core_problem_and_value: ",
               "```",
               "",
-              "Depois da sua resposta, o workflow vai gerar:",
+              "After your reply, the workflow will generate:",
               "- `.ai/context/project-brief.md`",
               "- `.ai/context/architecture.md`",
               "- `.ai/context/stack.md`",
               "- `.ai/context/coding-style.md`",
               "- `.ai/context/security.md`",
               "",
-              "E em seguida disparar `Bootstrap Labels`."
+              "It will then trigger `Bootstrap Labels`."
             ].join("\\n");
 
             await github.rest.issues.createComment({
@@ -216,7 +216,7 @@ jobs:
 
             Source issue: #${{ github.event.issue.number }}
           branch: "chore/bootstrap-context-issue-${{ github.event.issue.number }}"
-          base: ${{ github.event.repository.default_branch }}
+          base: dev
           add-paths: |
             .ai/context/project-brief.md
             .ai/context/architecture.md
@@ -228,12 +228,11 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const ref = context.payload.repository.default_branch || "main";
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: "bootstrap-labels.yml",
-              ref
+              ref: "dev"
             });
 
       - name: Comment bootstrap completion
@@ -247,18 +246,18 @@ jobs:
             const prUrl = process.env.PR_URL;
             const contextMsg = hasChanges
               ? (prUrl
-                  ? `Arquivos de contexto gerados. PR criado: ${prUrl}`
-                  : "Arquivos de contexto gerados e commitados.")
-              : "Nenhuma alteração de contexto foi detectada (sem diff nos arquivos em `.ai/context/*`).";
+                  ? `Context files generated. PR created: ${prUrl}`
+                  : "Context files generated and committed.")
+              : "No context changes were detected (no diff in `.ai/context/*`).";
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: [
-                "Bootstrap arquitetural processado.",
+                "Architect bootstrap completed.",
                 "",
                 contextMsg,
-                "Workflow `Bootstrap Labels` disparado para sincronizar labels."
+                "The `Bootstrap Labels` workflow was triggered to synchronize labels."
               ].join("\\n")
             });

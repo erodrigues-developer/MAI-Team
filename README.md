@@ -21,9 +21,9 @@ MAI Team provides a foundation for an AI-assisted software delivery lifecycle:
 2. A Dev Agent can implement the story
 3. A pull request is opened
 4. AI review runs automatically
-5. QA checks run automatically
-6. Jira is updated based on PR lifecycle events
-7. A human still approves the merge
+5. Human approval remains part of the merge gate
+6. Jira is updated as work moves through review and test readiness
+7. QA validation runs after human approval and can auto-merge into `dev`
 
 This keeps human oversight while automating repetitive engineering work.
 
@@ -87,13 +87,14 @@ This project uses the following workflow model:
 
 ### `qa-agent.yml`
 
-- triggered on pull request events
-- runs automated validation
+- triggered after human PR approval, after AI review success, or manually via `workflow_dispatch`
+- runs automated validation only when both approval gates are satisfied on the same PR head
+- merges the PR into `dev` when validation passes
 
 ### `jira-sync.yml`
 
-- triggered on pull request events
-- moves Jira issues to the appropriate status
+- triggered on pull request events or manually via `workflow_dispatch`
+- moves Jira issues to review status when the PR opens
 
 ### `bootstrap-labels.yml`
 
@@ -235,7 +236,11 @@ Create the secrets required by the provider you selected.
 - `JIRA_EMAIL`
 - `JIRA_API_TOKEN`
 - `JIRA_TRANSITION_ID_IN_REVIEW`
-- `JIRA_TRANSITION_ID_TESTING`
+- `JIRA_TRANSITION_ID_READY_FOR_TESTS`
+
+### Required for bot-authenticated PR operations
+
+- `MAI_BOT_TOKEN`
 
 ### Example values
 
@@ -248,7 +253,8 @@ JIRA_BASE_URL=https://your-company.atlassian.net
 JIRA_EMAIL=you@company.com
 JIRA_API_TOKEN=your_atlassian_api_token
 JIRA_TRANSITION_ID_IN_REVIEW=31
-JIRA_TRANSITION_ID_TESTING=41
+JIRA_TRANSITION_ID_READY_FOR_TESTS=41
+MAI_BOT_TOKEN=github_pat_or_app_token
 ```
 
 The Jira Cloud REST API docs state that basic authentication for REST APIs uses an Atlassian account email address plus an API token, and REST URLs follow the form `https://<site-url>/rest/api/3/...`.
@@ -280,7 +286,7 @@ Authentication is done through Basic Auth in the request.
 The workflow needs transition IDs to move a Jira issue across statuses such as:
 
 - In Review
-- Testing
+- Ready for Tests
 
 These IDs are Jira-workflow-specific, so they are not universal.
 
@@ -298,12 +304,12 @@ curl --request GET \
 Then inspect the response and find the transition IDs corresponding to:
 
 - your review column
-- your testing column
+- your ready for tests column
 
 Save those IDs as:
 
 - `JIRA_TRANSITION_ID_IN_REVIEW`
-- `JIRA_TRANSITION_ID_TESTING`
+- `JIRA_TRANSITION_ID_READY_FOR_TESTS`
 
 The Jira REST API includes transitions under the issue API surface, and the docs for Jira Cloud REST v3 document issue and transition endpoints under `/rest/api/3`.
 
@@ -319,11 +325,7 @@ Go to:
 
 Create a branch protection rule for your main delivery branch, usually:
 
-- `main`
-
-or:
-
-- `develop`
+- `dev`
 
 ### Recommended settings
 
@@ -355,6 +357,7 @@ This gives you the desired behavior:
 - 1 human approval
 - AI review check passed
 - QA check passed
+- QA automation merges into `dev`
 
 ---
 
@@ -499,28 +502,46 @@ The agent should:
 
 5. AI Review runs on the pull request
 
-The `ai-review.yml` workflow runs automatically.
+The `ai-review.yml` workflow runs automatically on pull request updates, and the dev workflow also dispatches it explicitly after creating or updating a PR so the review does not depend on bot-generated PR events.
 
-6. QA runs on the pull request
+If the AI review returns `VERDICT: FAIL`, it comments on the PR and labels the source issue with `dev:fix_review` to start a new dev cycle.
 
-The `qa-agent.yml` workflow runs automatically.
+If a human reviewer submits `Changes requested`, the workflow also labels the source issue with `dev:fix_review`.
 
-7. Jira sync runs
-
-The `jira-sync.yml` workflow should:
-
-- move to In Review when the PR opens
-- move to Testing when the PR is merged
-
-8. Human approves and merges
+6. Human approves the PR
 
 A human reviewer approves the PR.
 
-If branch protection is configured correctly, the PR can only merge after:
+7. QA runs when both approval gates are satisfied
+
+The `qa-agent.yml` workflow can be triggered by human approval or by AI review success, but it only starts validation when both conditions are true for the same PR head:
+
+- `ai-review` passed
+- human review is `APPROVED`
+
+8. QA automation merges the PR and moves Jira to Ready for Tests
+
+If QA automation passes, it merges the PR into `dev` and updates Jira to the Ready for Tests column.
+
+If QA automation fails due to code or validation issues, it labels the source issue with `dev:fix_review` to start the full dev -> AI review -> human review chain again.
+
+9. Human QA tests in Jira
+
+A QA person validates the change in Jira.
+
+If QA finds a bug, your Jira automation should reapply the label `dev:fix_review` to the linked GitHub issue. Because there is no open PR after the merge, the dev automation will create a new PR and run the full chain again.
+
+10. Further release flow is manual
+
+After QA approval in Jira, the remaining release and publishing flow stays manual.
+
+If branch protection is configured correctly, the PR can only be auto-merged by QA after:
 
 - 1 human approval
 - `ai-review` passed
 - `qa-check` passed
+
+Use `MAI_BOT_TOKEN` for bot-created PRs, workflow dispatches, and protected-branch auto-merge.
 
 ---
 
@@ -564,11 +585,12 @@ Default set:
 - `requirements:approved`
 - `ui:approved`
 - `dev:in_progress`
+- `dev:fix_review`
 - `pr:opened`
-- `testing`
+- `ready_for_tests`
 - `ready_for_publish`
 
-For the MVP, `dev:in_progress` is the minimum required trigger label.
+For the MVP, `dev:in_progress` starts the first implementation cycle and `dev:fix_review` starts a correction cycle for the existing PR.
 
 ---
 
@@ -610,8 +632,8 @@ Recommended required sections in the issue body:
 Recommended Jira transitions for the MVP:
 
 - PR opened -> In Review
-- PR merged -> Testing
-- manual validation or release gate -> Ready for Publish
+- QA automation passed and PR merged into `dev` -> Ready for Tests
+- manual QA approval or release gate -> Ready for Publish
 
 This keeps the first version simple and reliable.
 
@@ -642,7 +664,7 @@ Jira Cloud REST authentication for personal scripts and bots uses email + API to
 Most likely the transition ID is wrong for your Jira workflow. Query the transitions endpoint for the issue again and update:
 
 - `JIRA_TRANSITION_ID_IN_REVIEW`
-- `JIRA_TRANSITION_ID_TESTING`
+- `JIRA_TRANSITION_ID_READY_FOR_TESTS`
 
 ### AI workflow fails immediately
 
@@ -700,8 +722,10 @@ Use this checklist to know when MAI Team is operational:
 - [ ] one test issue created
 - [ ] label `dev:in_progress` applied
 - [ ] PR automatically reviewed by AI
-- [ ] QA check executed
-- [ ] Jira issue moved automatically
+- [ ] PR approved by a human
+- [ ] QA check executed after human approval
+- [ ] PR automatically merged into `dev` by QA
+- [ ] Jira issue moved automatically to the expected review/test column
 
 ---
 

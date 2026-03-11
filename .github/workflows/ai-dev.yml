@@ -9,6 +9,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
 
 concurrency:
   group: ai-dev-issue-${{ github.event.issue.number }}
@@ -16,7 +17,9 @@ concurrency:
 
 jobs:
   validate-issue:
-    if: github.event.label.name == 'dev:in_progress' && github.event.issue.state == 'open'
+    if: >
+      (github.event.label.name == 'dev:in_progress' || github.event.label.name == 'dev:fix_review')
+      && github.event.issue.state == 'open'
     runs-on: ubuntu-latest
     outputs:
       jira_key: ${{ steps.extract.outputs.jira_key }}
@@ -64,11 +67,11 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: [
-                "AI Dev Agent bloqueado.",
+                "AI Dev Agent blocked.",
                 "",
-                "Motivos possíveis:",
-                "- título sem chave Jira (ex.: MAI-123 - Add AI review workflow)",
-                "- corpo da issue vazio"
+                "Possible reasons:",
+                "- issue title is missing a Jira key (for example: MAI-123 - Add AI review workflow)",
+                "- issue body is empty"
               ].join("\n")
             })
 
@@ -76,43 +79,181 @@ jobs:
     needs: validate-issue
     if: needs.validate-issue.outputs.can_proceed == 'true'
     runs-on: ubuntu-latest
-    env:
-      DEV_AGENT_PROMPT: |
-        You are the DEV agent for this repository.
-
-        Read and follow:
-        - .ai/agents/dev.md
-        - .ai/policies/workflows.yml
-        - .ai/context/project-brief.md if it exists
-        - .ai/context/architecture.md if it exists
-        - .ai/context/stack.md if it exists
-        - .ai/context/coding-style.md if it exists
-        - .ai/context/security.md if it exists
-        - docs/requirements/**
-        - docs/architecture/**
-        - docs/adr/**
-
-        Current GitHub issue:
-        - Number: ${{ github.event.issue.number }}
-        - Title: ${{ github.event.issue.title }}
-        - Body:
-        ${{ github.event.issue.body }}
-
-        Requirements:
-        1. First inspect the repository and identify the smallest viable implementation plan.
-        2. Implement only the minimum valid solution for this story.
-        3. Create or update tests when appropriate.
-        4. Prefer editing existing files over introducing new abstractions.
-        5. Do not create or modify generated directories such as `node_modules`, `dist`, `build`, `coverage`, or lockfiles unless the story explicitly requires dependency setup.
-        6. If dependencies are needed, edit the manifest files only; never commit installed dependency directories.
-        7. Keep scope minimal and avoid unrelated changes.
-        8. Stop as soon as the implementation and tests are complete enough for a PR.
-        9. Do not run git commands and do not create branch/PR.
-           The workflow will create the PR automatically.
 
     steps:
+      - name: Resolve linked pull request and review feedback
+        id: review_context
+        if: github.event.label.name == 'dev:fix_review'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          JIRA_KEY: ${{ needs.validate-issue.outputs.jira_key }}
+        with:
+          script: |
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const jiraKey = process.env.JIRA_KEY;
+            const branchName = `feature/${jiraKey}-issue-${issueNumber}`;
+
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100
+            });
+
+            const pr = pulls.find((candidate) => {
+              const body = candidate.body || "";
+              return candidate.head.ref === branchName || body.includes(`Source issue: #${issueNumber}`);
+            });
+
+            if (!pr) {
+              core.setOutput("pr_found", "false");
+              core.setOutput("review_feedback", "No linked open pull request was found for this issue.");
+              return;
+            }
+
+            const [reviewsResponse, issueCommentsResponse, reviewCommentsResponse] = await Promise.all([
+              github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100
+              }),
+              github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                per_page: 100
+              }),
+              github.rest.pulls.listReviewComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100
+              })
+            ]);
+
+            const reviews = reviewsResponse.data
+              .filter((review) => ["CHANGES_REQUESTED", "COMMENTED"].includes(review.state) && review.body)
+              .slice(-10)
+              .map((review) => [
+                `- ${review.user?.login || "unknown"} (${review.state}) on ${review.submitted_at || review.created_at}:`,
+                review.body
+              ].join("\n"));
+
+            const issueComments = issueCommentsResponse.data
+              .filter((comment) => comment.body)
+              .slice(-10)
+              .map((comment) => [
+                `- ${comment.user?.login || "unknown"} commented on ${comment.created_at}:`,
+                comment.body
+              ].join("\n"));
+
+            const reviewComments = reviewCommentsResponse.data
+              .filter((comment) => comment.body)
+              .slice(-20)
+              .map((comment) => [
+                `- ${comment.user?.login || "unknown"} on ${comment.path}:${comment.line || comment.original_line || "?"}:`,
+                comment.body
+              ].join("\n"));
+
+            const feedbackSections = [
+              `Linked pull request: #${pr.number} ${pr.title}`,
+              pr.html_url
+            ];
+
+            if (reviews.length > 0) {
+              feedbackSections.push("Review submissions:");
+              feedbackSections.push(reviews.join("\n\n"));
+            }
+
+            if (issueComments.length > 0) {
+              feedbackSections.push("Pull request conversation:");
+              feedbackSections.push(issueComments.join("\n\n"));
+            }
+
+            if (reviewComments.length > 0) {
+              feedbackSections.push("Inline review comments:");
+              feedbackSections.push(reviewComments.join("\n\n"));
+            }
+
+            core.setOutput("pr_found", "true");
+            core.setOutput("pr_number", String(pr.number));
+            core.setOutput("pr_url", pr.html_url);
+            core.setOutput("pr_head_ref", pr.head.ref);
+            core.setOutput("review_feedback", feedbackSections.join("\n\n"));
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.review_context.outputs.pr_head_ref || 'dev' }}
+
+      - name: Build dev prompt
+        shell: bash
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          TRIGGER_LABEL: ${{ github.event.label.name }}
+          PR_NUMBER: ${{ steps.review_context.outputs.pr_number }}
+          PR_URL: ${{ steps.review_context.outputs.pr_url }}
+          REVIEW_FEEDBACK: ${{ steps.review_context.outputs.review_feedback }}
+        run: |
+          {
+            echo "DEV_AGENT_PROMPT<<EOF"
+            echo "You are the DEV agent for this repository."
+            echo
+            echo "Read and follow:"
+            echo "- .ai/agents/dev.md"
+            echo "- .ai/policies/workflows.yml"
+            echo "- .ai/context/project-brief.md if it exists"
+            echo "- .ai/context/architecture.md if it exists"
+            echo "- .ai/context/stack.md if it exists"
+            echo "- .ai/context/coding-style.md if it exists"
+            echo "- .ai/context/security.md if it exists"
+            echo "- docs/requirements/**"
+            echo "- docs/architecture/**"
+            echo "- docs/adr/**"
+            echo
+            echo "Current GitHub issue:"
+            echo "- Number: $ISSUE_NUMBER"
+            echo "- Title: $ISSUE_TITLE"
+            echo "- Body:"
+            printf '%s\n' "$ISSUE_BODY"
+            echo
+            if [ "$TRIGGER_LABEL" = "dev:fix_review" ]; then
+              echo "This run was triggered by review feedback."
+              if [ -n "$PR_NUMBER" ]; then
+                echo "- Existing pull request: #$PR_NUMBER"
+              else
+                echo "- No open pull request is currently linked to this issue. Create a fresh follow-up PR from \`dev\`."
+              fi
+              if [ -n "$PR_URL" ]; then
+                echo "- Pull request URL: $PR_URL"
+              fi
+              echo
+              echo "Review feedback to address:"
+              printf '%s\n' "$REVIEW_FEEDBACK"
+              echo
+              echo "Additional fix-cycle requirements:"
+              echo "1. Treat review feedback as the primary source of truth for this cycle."
+              echo "2. Update the existing implementation and keep work scoped to the requested changes."
+              echo "3. Prefer updating the existing branch/PR rather than creating parallel work."
+              echo
+            fi
+            echo "Requirements:"
+            echo "1. First inspect the repository and identify the smallest viable implementation plan."
+            echo "2. Implement only the minimum valid solution for this story."
+            echo "3. Create or update tests when appropriate."
+            echo "4. Prefer editing existing files over introducing new abstractions."
+            echo "5. Do not create or modify generated directories such as \`node_modules\`, \`dist\`, \`build\`, \`coverage\`, or lockfiles unless the story explicitly requires dependency setup."
+            echo "6. If dependencies are needed, edit the manifest files only; never commit installed dependency directories."
+            echo "7. Keep scope minimal and avoid unrelated changes."
+            echo "8. Stop as soon as the implementation and tests are complete enough for a PR."
+            echo "9. Do not run git commands and do not create branch/PR."
+            echo "   The workflow will create or update the PR automatically."
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
       - name: Resolve AI configuration
         id: ai_config
@@ -227,16 +368,52 @@ jobs:
         if: steps.detect_changes.outputs.has_changes == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "feat: implement issue #${{ github.event.issue.number }}"
+          token: ${{ secrets.MAI_BOT_TOKEN || github.token }}
+          commit-message: "${{ github.event.label.name == 'dev:fix_review' && format('fix: address review feedback for issue #{0}', github.event.issue.number) || format('feat: implement issue #{0}', github.event.issue.number) }}"
           title: "[${{ needs.validate-issue.outputs.jira_key }}] Implement issue #${{ github.event.issue.number }}"
           body: |
             Automated implementation generated by AI Dev Agent.
 
             Source issue: #${{ github.event.issue.number }}
-            Trigger label: `dev:in_progress`
+            Trigger label: `${{ github.event.label.name }}`
           branch: "feature/${{ needs.validate-issue.outputs.jira_key }}-issue-${{ github.event.issue.number }}"
-          base: ${{ github.event.repository.default_branch }}
+          base: dev
+
+      - name: Trigger Jira Sync workflow
+        if: steps.create_pr.outputs.pull-request-number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
+        with:
+          github-token: ${{ secrets.MAI_BOT_TOKEN || github.token }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "jira-sync.yml",
+              ref: "dev",
+              inputs: {
+                pr_number: process.env.PR_NUMBER
+              }
+            });
+
+      - name: Trigger AI Review workflow
+        if: steps.create_pr.outputs.pull-request-number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
+        with:
+          github-token: ${{ secrets.MAI_BOT_TOKEN || github.token }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "ai-review.yml",
+              ref: "dev",
+              inputs: {
+                pr_number: process.env.PR_NUMBER
+              }
+            });
 
       - name: Comment on issue
         if: success()
@@ -256,24 +433,42 @@ jobs:
             const aiModelId = process.env.AI_MODEL_ID;
             const resultMsg = hasChanges
               ? (prUrl
-                  ? `Implementação gerada e PR criado: ${prUrl}`
-                  : "Implementação gerada com alterações, mas sem URL de PR disponível.")
-              : "Nenhuma alteração de código foi detectada; PR não criado.";
+                  ? `Implementation generated and PR created: ${prUrl}`
+                  : "Implementation generated with changes, but no PR URL was returned.")
+              : "No code changes were detected; PR was not created.";
             const executionMsg = aiOutcome === "success"
-              ? `Execução do agente ${aiProvider} (${aiModelId}) concluída com sucesso.`
-              : `Execução do agente ${aiProvider} (${aiModelId}) terminou com status \`${aiOutcome}\`.`;
+              ? `The ${aiProvider} agent (${aiModelId}) completed successfully.`
+              : `The ${aiProvider} agent (${aiModelId}) finished with status \`${aiOutcome}\`.`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
               body: [
-                "AI Dev Agent processado.",
+                "AI Dev Agent completed.",
                 "",
                 executionMsg,
                 resultMsg
               ].join("\n")
             })
+
+      - name: Clear fix-review label for future cycles
+        if: always() && github.event.label.name == 'dev:fix_review'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: "dev:fix_review"
+              });
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+            }
 
       - name: Fail only when AI execution failed and no code changes were produced
         if: steps.ai_outcome.outputs.outcome != 'success' && steps.detect_changes.outputs.has_changes != 'true'
