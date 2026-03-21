@@ -1,6 +1,48 @@
 import request from 'supertest';
 import app from '../../src/app';
 
+describe('GET /tasks', () => {
+  it('should return an empty array when no tasks exist', async () => {
+    const response = await request(app)
+      .get('/tasks')
+      .expect('Content-Type', /json/)
+      .expect(200);
+
+    expect(response.body).toEqual([]);
+  });
+
+  it('should return created tasks', async () => {
+    await request(app).post('/tasks').send({ title: 'Task One' }).expect(201);
+    await request(app).post('/tasks').send({ title: 'Task Two' }).expect(201);
+
+    const response = await request(app)
+      .get('/tasks')
+      .expect('Content-Type', /json/)
+      .expect(200);
+
+    expect(response.body.length).toBeGreaterThanOrEqual(2);
+    const titles = response.body.map((t: { title: string }) => t.title);
+    expect(titles).toContain('Task One');
+    expect(titles).toContain('Task Two');
+  });
+
+  it('should return tasks matching the expected schema', async () => {
+    const response = await request(app)
+      .get('/tasks')
+      .expect(200);
+
+    expect(Array.isArray(response.body)).toBe(true);
+    for (const task of response.body) {
+      expect(task).toMatchObject({
+        id: expect.any(String),
+        title: expect.any(String),
+        done: expect.any(Boolean),
+      });
+      expect(task.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    }
+  });
+});
+
 describe('POST /tasks', () => {
   it('should create a task successfully with valid input', async () => {
     // Act

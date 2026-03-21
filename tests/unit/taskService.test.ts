@@ -122,4 +122,27 @@ describe('TaskService', () => {
       expect(result.done).toBe(false);
     });
   });
+
+  describe('getAllTasks', () => {
+    it('should return empty array when no tasks exist', async () => {
+      mockRepository.findAll.mockResolvedValue([]);
+
+      const result = await taskService.getAllTasks();
+
+      expect(mockRepository.findAll).toHaveBeenCalledTimes(1);
+      expect(result).toEqual([]);
+    });
+
+    it('should return all tasks from repository', async () => {
+      const tasks: Task[] = [
+        { id: 'uuid-1', title: 'Task One', done: false },
+        { id: 'uuid-2', title: 'Task Two', done: true },
+      ];
+      mockRepository.findAll.mockResolvedValue(tasks);
+
+      const result = await taskService.getAllTasks();
+
+      expect(result).toEqual(tasks);
+    });
+  });
 });
